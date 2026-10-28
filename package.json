@@ -1,0 +1,32 @@
+{
+  "name": "jobpilot",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:test:create": "npm run db:test:create --workspace server",
+    "db:migrate": "npm run migrate:dev --workspace server",
+    "db:migrate:test": "npm run migrate:test --workspace server",
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspace server",
+    "build": "npm run build --workspaces --if-present",
+    "test:integration": "npm run test:integration --workspace server"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "26.6.5"
+  },
+  "allowScripts": {
+    "prisma@7.10.1": true,
+    "@prisma/engines@7.10.1": true,
+    "esbuild@0.28.2": true
+  }
+}

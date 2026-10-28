@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+server/src/generated/prisma/
+server/dist/
+shared/dist/
+web/.next/
+web/next-env.d.ts
+*.tsbuildinfo
+coverage/
+.DS_Store

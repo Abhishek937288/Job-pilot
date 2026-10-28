@@ -1,0 +1,250 @@
+generator client {
+  provider               = "prisma-client"
+  output                 = "../src/generated/prisma"
+  moduleFormat           = "esm"
+  importFileExtension    = "js"
+  generatedFileExtension = "ts"
+  previewFeatures        = ["partialIndexes"]
+}
+
+// Connection URL lives in prisma.config.ts. DATABASE_URL must pin ?schema=public so
+// Prisma never inspects, diffs or drops the "pgboss" schema owned by pg-boss.
+datasource db {
+  provider = "postgresql"
+}
+
+enum RemotePreference {
+  ONSITE
+  HYBRID
+  REMOTE
+  ANY
+}
+
+enum ExtractionStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  NEEDS_REVIEW
+}
+
+model Resume {
+  id               String           @id @default(cuid())
+  fileName         String
+  mimeType         String
+  sizeBytes        Int
+  /// Re-uploading the same file is a no-op.
+  sha256           String           @unique
+  /// Original upload; never modified.
+  fileData         Bytes
+  extractedText    String
+  extractionStatus ExtractionStatus @default(PENDING)
+  extractionError  String?
+  uploadedAt       DateTime         @default(now())
+
+  profile  Profile?
+  versions ResumeVersion[]
+
+  @@index([uploadedAt])
+}
+
+/// At most one row has isActive = true (partial unique index).
+model Profile {
+  id       String  @id @default(cuid())
+  isActive Boolean @default(true)
+  resumeId String? @unique
+  resume   Resume? @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+
+  name                 String?
+  headline             String?
+  totalYearsExperience Float?
+  /// [{ name, proficiency }], validated by @jobpilot/shared profileDataSchema
+  skills               Json              @default("[]")
+  roles                String[]
+  companies            String[]
+  /// [{ institution, degree, field, startYear, endYear }]
+  education            Json              @default("[]")
+  /// [{ name, description, technologies[] }]
+  projects             Json              @default("[]")
+  targetTitles         String[]
+  preferredLocations   String[]
+  remotePreference     RemotePreference?
+  noticePeriod         String?
+  expectedSalary       String?
+
+  /// Untouched LLM output, for auditing.
+  rawExtraction Json?
+  userEditedAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([isActive], map: "Profile_one_active_key", where: { isActive: true })
+}
+
+model ResumeVersion {
+  id            String   @id @default(cuid())
+  resumeId      String
+  resume        Resume   @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+  jobId         String?
+  job           Job?     @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  label         String
+  /// Structured tailored resume used for DOCX generation.
+  content       Json
+  addedKeywords String[]
+  createdAt     DateTime @default(now())
+
+  @@index([resumeId])
+  @@index([jobId])
+}
+
+// ---------------------------------------------------------------- Phase 2: search
+
+enum ApplyMethod {
+  EMAIL
+  GREENHOUSE
+  LEVER
+  ASHBY
+  WORKDAY
+  COMPANY_PORTAL
+  LINKEDIN_EASY_APPLY
+  REFERRAL_ONLY
+  UNKNOWN
+}
+
+enum RemoteType {
+  ONSITE
+  HYBRID
+  REMOTE
+  UNKNOWN
+}
+
+/// How the job's location compares with my preferred locations. Mismatches are flagged, never dropped.
+enum LocationMatch {
+  MATCH
+  REMOTE
+  MISMATCH
+  UNKNOWN
+}
+
+enum JobSource {
+  SERPER
+  GREENHOUSE
+  LEVER
+  ASHBY
+}
+
+enum AtsProvider {
+  GREENHOUSE
+  LEVER
+  ASHBY
+}
+
+enum ApplicationStatus {
+  NEW
+  DONE
+  IGNORED
+  SAVED
+}
+
+enum SearchRunStatus {
+  /// Queries generated and editable; nothing has been spent.
+  DRAFT
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+model Job {
+  id               String        @id @default(cuid())
+  canonicalUrl     String        @unique
+  /// sha256 of normalized company + title + location. Location-less jobs get a URL-scoped fingerprint
+  /// so two cities are never merged by accident.
+  fingerprint      String
+  company          String
+  title            String
+  location         String?
+  locationMatch    LocationMatch @default(UNKNOWN)
+  remoteType       RemoteType    @default(UNKNOWN)
+  applyMethod      ApplyMethod   @default(UNKNOWN)
+  applyUrl         String?
+  applyEmails      String[]
+  snippet          String?
+  jdText           String?
+  fitScore         Int?
+  needsReview      Boolean       @default(false)
+  expired          Boolean       @default(false)
+  source           JobSource
+  /// The search query that found it (Serper results only).
+  sourceQuery      String?
+  atsProvider      AtsProvider?
+  atsSlug          String?
+  atsJobId         String?
+  postedAt         DateTime?
+  /// Whatever the search/ATS result contained, minus large description fields.
+  raw              Json?
+  firstSeenAt      DateTime      @default(now())
+  lastSeenAt       DateTime      @default(now())
+  firstSearchRunId String?
+  firstSearchRun   SearchRun?    @relation(fields: [firstSearchRunId], references: [id], onDelete: SetNull)
+
+  status         JobStatus?
+  resumeVersions ResumeVersion[]
+
+  @@index([fingerprint])
+  @@index([firstSeenAt])
+  @@index([locationMatch])
+}
+
+model JobStatus {
+  jobId     String            @id
+  job       Job               @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  status    ApplicationStatus @default(NEW)
+  notes     String?
+  updatedAt DateTime          @updatedAt
+
+  @@index([status])
+}
+
+model SearchRun {
+  id                String          @id @default(cuid())
+  status            SearchRunStatus @default(DRAFT)
+  /// [{ q, location }] as confirmed by me (or as generated while DRAFT).
+  queries           Json
+  queryGenerator    String          @default("llm")
+  includeAts        Boolean         @default(true)
+  createdAt         DateTime        @default(now())
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  newJobsCount      Int             @default(0)
+  resultsCount      Int             @default(0)
+  duplicateUrlCount Int             @default(0)
+  blockedCount      Int             @default(0)
+  /// HTTP requests sent to Serper, including the single allowed retry.
+  serperCalls       Int             @default(0)
+  /// Credits Serper reported as charged.
+  serperCredits     Int             @default(0)
+  atsCalls          Int             @default(0)
+  error             String?
+  /// Progress events [{ at, level, msg }] for the live UI.
+  log               Json            @default("[]")
+
+  jobs Job[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model AtsCompany {
+  id            String      @id @default(cuid())
+  provider      AtsProvider
+  /// Board token / site name, as used in the public API path.
+  slug          String
+  displayName   String?
+  enabled       Boolean     @default(true)
+  lastFetchedAt DateTime?
+  lastJobCount  Int?
+  lastError     String?
+  createdAt     DateTime    @default(now())
+
+  @@unique([provider, slug])
+}
