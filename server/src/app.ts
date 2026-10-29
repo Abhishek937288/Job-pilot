@@ -1,36 +1,50 @@
-import express from "express";
+import { randomUUID } from "node:crypto";
+import cookieParser from "cookie-parser";
+import express, { type Express } from "express";
+import helmet from "helmet";
+import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
-import { requireSession } from "./middleware/auth.js";
-import { errorHandler, notFoundHandler } from "./middleware/error.js";
-import { authRouter } from "./routes/auth.routes.js";
-import { profileRouter } from "./routes/profile.routes.js";
-import { resumeRouter } from "./routes/resume.routes.js";
-import { atsCompanyRouter, jobsRouter, searchRunRouter } from "./routes/search.routes.js";
+import { logger } from "./lib/logger.js";
+import { loadSession, requireUser } from "./middleware/auth.js";
+import { errorHandler, notFoundHandler } from "./middleware/errors.js";
+import { ipLimiter, originCheck, userLimiter } from "./middleware/security.js";
+import { authRouter } from "./routes/auth.js";
+import { companiesRouter } from "./routes/companies.js";
+import { eventsRouter } from "./routes/events.js";
+import { jobsRouter } from "./routes/jobs.js";
+import { profilesRouter } from "./routes/profiles.js";
 
-function trustProxySetting(v: string): boolean | number | string {
-  if (v === "true") return true;
-  if (v === "false") return false;
-  if (/^\d+$/.test(v)) return Number(v);
-  return v;
-}
-
-export function createApp(): express.Express {
+export function createApp(): Express {
   const app = express();
+  app.set("trust proxy", env.TRUST_PROXY === "true" ? true : /^\d+$/.test(env.TRUST_PROXY) ? Number(env.TRUST_PROXY) : env.TRUST_PROXY);
   app.disable("x-powered-by");
-  app.set("trust proxy", trustProxySetting(env.TRUST_PROXY));
-  app.use(express.json({ limit: "1mb" }));
+
+  app.use(helmet());
+  app.use(
+    pinoHttp({
+      logger,
+      genReqId: (req) => (req.headers["x-request-id"] as string) || randomUUID(),
+      // Request ids and user ids only: no bodies (resumes) and no cookies.
+      serializers: { req: (req) => ({ id: req.id, method: req.method, url: req.url }), res: (res) => ({ statusCode: res.statusCode }) },
+      customProps: (req) => ({ userId: (req as express.Request).user ? String((req as express.Request).user!._id) : undefined }),
+      autoLogging: { ignore: (req) => req.url === "/health" || req.url === "/events" },
+    }),
+  );
+  app.use(ipLimiter);
+  app.use(express.json({ limit: "100kb" }));
+  app.use(cookieParser());
+  app.use(originCheck);
+  app.use(loadSession);
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
   });
-
-  // Everything is mounted under /api so the Next.js rewrite can pass paths through unchanged.
-  app.use("/api/auth", authRouter);
-  app.use("/api/resumes", requireSession, resumeRouter);
-  app.use("/api/profile", requireSession, profileRouter);
-  app.use("/api/search-runs", requireSession, searchRunRouter);
-  app.use("/api/jobs", requireSession, jobsRouter);
-  app.use("/api/ats-companies", requireSession, atsCompanyRouter);
+  app.use("/auth", authRouter);
+  app.use("/events", requireUser, eventsRouter);
+  app.use(requireUser, userLimiter);
+  app.use("/profiles", profilesRouter);
+  app.use("/companies", companiesRouter);
+  app.use("/", jobsRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
