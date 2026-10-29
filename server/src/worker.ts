@@ -1,48 +1,62 @@
-import { prisma } from "./db/prisma.js";
+import { Worker } from "bullmq";
+import { env } from "./config/env.js";
+import { connectMongo, disconnectMongo } from "./db/mongo.js";
+import { Company } from "./db/models/company.js";
+import { SearchRun } from "./db/models/searchRun.js";
 import { logger } from "./lib/logger.js";
-import { getBoss, QUEUES, stopBoss, type ExtractProfileJob, type SearchRunJob } from "./queue/boss.js";
-import { extractProfileForResume, markExtractionFailed } from "./services/profile.service.js";
-import { executeSearchRun, failInterruptedRuns } from "./services/search-run.service.js";
+import { closeRedis, createRedis } from "./lib/redis.js";
+import { runSearchPipeline } from "./pipeline/searchPipeline.js";
+import { closeQueues, enqueueCompanyRefresh, QUEUES, scheduleWatchlistRefresh, type SearchJobData, type WatchlistJobData } from "./queue/queues.js";
+import { refreshCompany } from "./watchlist/companies.js";
 
 async function main(): Promise<void> {
-  const boss = await getBoss({ worker: true });
+  await connectMongo();
 
-  const opts = { includeMetadata: true } as const;
-  await boss.work<ExtractProfileJob, void, typeof opts>(QUEUES.extractProfile, opts, async (jobs) => {
-    for (const job of jobs) {
-      try {
-        await extractProfileForResume(job.data.resumeId);
-      } catch (err) {
-        logger.error({ err, jobId: job.id, retryCount: job.retryCount }, "extract-profile job failed");
-        if (job.retryCount >= job.retryLimit) await markExtractionFailed(job.data.resumeId, err);
-        throw err;
+  // Runs left "running" by a crashed worker can't resume: close them so the user can start again.
+  const stale = await SearchRun.updateMany(
+    { status: "running", startedAt: { $lt: new Date(Date.now() - 30 * 60_000) } },
+    { $set: { status: "failed", error: "Interrupted (worker restarted)", finishedAt: new Date() } },
+  );
+  if (stale.modifiedCount) logger.warn({ count: stale.modifiedCount }, "marked interrupted runs as failed");
+
+  const search = new Worker<SearchJobData>(
+    QUEUES.search,
+    async (job) => {
+      await runSearchPipeline(job.data);
+    },
+    { connection: createRedis("worker:search"), concurrency: env.SEARCH_CONCURRENCY },
+  );
+
+  const watchlist = new Worker<WatchlistJobData>(
+    QUEUES.watchlist,
+    async (job) => {
+      if (job.data.kind === "refresh-company") {
+        await refreshCompany(job.data.companyId);
+        return;
       }
-    }
-  });
+      // Fan out one job per company so one slow or broken board doesn't hold up the rest.
+      const companies = await Company.find({}, { _id: 1 });
+      for (const c of companies) await enqueueCompanyRefresh(String(c._id));
+      logger.info({ companies: companies.length }, "watchlist refresh queued");
+    },
+    { connection: createRedis("worker:watchlist"), concurrency: 3 },
+  );
 
-  const interrupted = await failInterruptedRuns();
-  if (interrupted) logger.warn({ interrupted }, "marked interrupted search runs as FAILED");
+  for (const w of [search, watchlist]) {
+    w.on("failed", (job, err) => logger.error({ queue: w.name, jobId: job?.id, err: err.message }, "job failed"));
+  }
+  await scheduleWatchlistRefresh();
+  logger.info({ queues: Object.values(QUEUES), refreshHours: env.WATCHLIST_REFRESH_HOURS }, "worker started");
 
-  await boss.work<SearchRunJob>(QUEUES.searchRun, async (jobs) => {
-    for (const job of jobs) {
-      logger.info({ searchRunId: job.data.searchRunId }, "search run started");
-      await executeSearchRun(job.data.searchRunId);
-      logger.info({ searchRunId: job.data.searchRunId }, "search run finished");
-    }
-  });
-
-  logger.info({ queues: Object.values(QUEUES) }, "worker started");
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "shutting down worker");
+    await Promise.allSettled([search.close(), watchlist.close()]);
+    await Promise.allSettled([closeQueues(), closeRedis(), disconnectMongo()]);
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
-
-async function shutdown(signal: string): Promise<void> {
-  logger.info({ signal }, "shutting down worker");
-  await stopBoss();
-  await prisma.$disconnect();
-  process.exit(0);
-}
-
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 main().catch((err: unknown) => {
   logger.fatal({ err }, "worker failed to start");

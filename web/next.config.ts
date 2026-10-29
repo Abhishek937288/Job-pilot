@@ -1,26 +1,29 @@
 import path from "node:path";
 import type { NextConfig } from "next";
 
-// Load the repo-root .env so API_INTERNAL_URL is shared with the server config.
+// The env lives in the repo-root `.env`, which Next does not read from `web/`. Variables that are
+// already set (e.g. by the shell or a container) win, because loadEnvFile never overwrites them.
 try {
-  process.loadEnvFile(path.resolve(import.meta.dirname, "../.env"));
+  process.loadEnvFile(path.resolve(process.cwd(), "..", ".env"));
 } catch {
-  // no .env file: rely on real environment variables
+  // No root .env: fall back to the defaults below.
 }
 
-const apiUrl = process.env.API_INTERNAL_URL ?? "http://localhost:4000";
+const apiUrl = (process.env.API_INTERNAL_URL ?? "http://localhost:4000").replace(/\/+$/, "");
 
 const nextConfig: NextConfig = {
   transpilePackages: ["@jobpilot/shared"],
-  // Browser only ever talks to this Next server; /api/* is proxied server-side to Express,
-  // so the session cookie is first-party and no API URL or secret reaches the client bundle.
-  async rewrites() {
-    return [{ source: "/api/:path*", destination: `${apiUrl}/api/:path*` }];
-  },
+  // Next's built-in gzip buffers proxied `text/event-stream` responses, which would hold back live
+  // search progress from `/api/events`. Compress at the reverse proxy / CDN instead.
+  compress: false,
   poweredByHeader: false,
   experimental: {
-    // Generating search queries waits on an LLM call; the rewrite proxy's default is 30s.
+    // Rewrites to the API are proxied with a 30 s idle timeout by default; a resume upload can take
+    // about that long before the API answers.
     proxyTimeout: 120_000,
+  },
+  async rewrites() {
+    return [{ source: "/api/:path*", destination: `${apiUrl}/:path*` }];
   },
 };
 

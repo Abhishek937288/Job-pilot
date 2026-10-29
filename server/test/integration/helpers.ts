@@ -1,65 +1,40 @@
-import type { ApplicationStatus, ProfileData } from "@jobpilot/shared";
-import { prisma } from "../../src/db/prisma.js";
-import { jobFingerprint } from "../../src/search/fingerprint.js";
-import { matchLocation } from "../../src/search/location.js";
+import mongoose from "mongoose";
+import request from "supertest";
+import type { Express } from "express";
+import { connectMongo } from "../../src/db/mongo.js";
 
-export const PREFS = ["Mumbai", "Navi Mumbai"];
+export async function setupDb(): Promise<void> {
+  const uri = process.env.MONGODB_URI!;
+  if (!/test/.test(uri)) throw new Error(`Refusing to run integration tests against a non-test database: ${uri}`);
+  await connectMongo(uri);
+  await mongoose.connection.dropDatabase();
+  await Promise.all(Object.values(mongoose.models).map((m) => m.createIndexes()));
+}
 
-export const READY_PROFILE: ProfileData = {
-  name: "Test User",
-  headline: null,
-  totalYearsExperience: 3,
-  skills: [{ name: "TypeScript", proficiency: "ADVANCED" }],
-  roles: [],
-  companies: [],
+/** A signed-in agent (cookie jar) for a fresh account. */
+export async function signUp(app: Express, email: string) {
+  const agent = request.agent(app);
+  const res = await agent.post("/auth/register").send({ email, password: "password123" });
+  if (res.status !== 201) throw new Error(`register failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return { agent, id: res.body.id as string };
+}
+
+export const PARSED = {
+  name: "Test Person",
+  email: "test@example.com",
+  location: "Pune",
+  headline: "Backend Engineer",
+  skills: ["Node.js", "PostgreSQL", "AWS"],
+  experience: [{ company: "Acme", title: "Backend Engineer", start: "2021-01", end: "present", summary: null }],
   education: [],
-  projects: [],
-  targetTitles: ["Backend Developer", "Software Developer"],
-  preferredLocations: PREFS,
-  remotePreference: "ANY",
-  noticePeriod: null,
-  expectedSalary: null,
 };
 
-export async function resetSearchTables(): Promise<void> {
-  await prisma.$executeRaw`TRUNCATE "JobStatus", "Job", "SearchRun", "AtsCompany", "ResumeVersion", "Profile", "Resume" CASCADE`;
-}
+export const PREFS = { desiredRole: "Backend Engineer", locations: ["Pune"], remote: "any", country: "in" };
 
-export async function seedProfile(): Promise<void> {
-  await prisma.profile.create({ data: { ...READY_PROFILE, isActive: true } });
-}
-
-export interface JobSeed {
-  url: string;
-  company?: string;
-  title?: string;
-  location?: string | null;
-  status?: ApplicationStatus;
-  expired?: boolean;
-  fitScore?: number | null;
-  applyMethod?: "GREENHOUSE" | "LEVER" | "ASHBY" | "UNKNOWN";
-  firstSeenAt?: Date;
-}
-
-export async function seedJob(s: JobSeed) {
-  const company = s.company ?? "Acme";
-  const title = s.title ?? "Backend Developer";
-  const location = s.location === undefined ? "Mumbai" : s.location;
-  const job = await prisma.job.create({
-    data: {
-      canonicalUrl: s.url,
-      fingerprint: jobFingerprint({ company, title, location, remoteType: "UNKNOWN", canonicalUrl: s.url }),
-      company,
-      title,
-      location,
-      locationMatch: matchLocation([location], "UNKNOWN", PREFS),
-      applyMethod: s.applyMethod ?? "UNKNOWN",
-      source: "SERPER",
-      expired: s.expired ?? false,
-      fitScore: s.fitScore ?? null,
-      ...(s.firstSeenAt ? { firstSeenAt: s.firstSeenAt } : {}),
-    },
-  });
-  if (s.status) await prisma.jobStatus.create({ data: { jobId: job.id, status: s.status } });
-  return job;
+export function uploadProfile(agent: ReturnType<typeof request.agent>) {
+  return agent
+    .post("/profiles")
+    .field("preferences", JSON.stringify(PREFS))
+    .field("consent", "true")
+    .attach("file", Buffer.from("%PDF-1.4 fake"), { filename: "cv.pdf", contentType: "application/pdf" });
 }
