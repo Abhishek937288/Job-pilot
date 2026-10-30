@@ -1,11 +1,13 @@
-# Background worker for the BullMQ queues. The web app and API run on Vercel (see vercel.json).
+# BullMQ worker, run as a free web service (free tier has no background workers). It serves a health
+# endpoint and pings itself every 10 minutes so Render doesn't spin it down. The web app and API run on Vercel (see vercel.json).
 services:
-  - type: worker
+  - type: web
     name: jobpilot-worker
     runtime: node
-    plan: starter
+    plan: free
     region: singapore
     buildCommand: npm ci --include=dev && npm run build
+    healthCheckPath: /
     startCommand: npm run start:worker -w server
     envVars:
       - key: NODE_ENV

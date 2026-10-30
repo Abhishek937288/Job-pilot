@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { Worker } from "bullmq";
 import { env } from "./config/env.js";
 import { connectMongo, disconnectMongo } from "./db/mongo.js";
@@ -48,8 +49,20 @@ async function main(): Promise<void> {
   await scheduleWatchlistRefresh();
   logger.info({ queues: Object.values(QUEUES), refreshHours: env.WATCHLIST_REFRESH_HOURS }, "worker started");
 
+  // Free web-service hosts need a listening port and sleep when idle: answer health checks and ping our own
+  // public URL so the worker keeps running. Not started where PORT is unset (local dev, paid worker hosts).
+  const health = process.env.PORT
+    ? createServer((_req, res) => {
+        res.end("ok");
+      }).listen(Number(process.env.PORT))
+    : undefined;
+  const publicUrl = process.env.RENDER_EXTERNAL_URL;
+  const keepAlive = health && publicUrl ? setInterval(() => void fetch(publicUrl).catch(() => undefined), 10 * 60_000) : undefined;
+
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "shutting down worker");
+    if (keepAlive) clearInterval(keepAlive);
+    health?.close();
     await Promise.allSettled([search.close(), watchlist.close()]);
     await Promise.allSettled([closeQueues(), closeRedis(), disconnectMongo()]);
     process.exit(0);
