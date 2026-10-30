@@ -4,6 +4,7 @@ import express, { type Express } from "express";
 import helmet from "helmet";
 import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
+import { connectMongo } from "./db/mongo.js";
 import { logger } from "./lib/logger.js";
 import { loadSession, requireUser } from "./middleware/auth.js";
 import { errorHandler, notFoundHandler } from "./middleware/errors.js";
@@ -18,6 +19,15 @@ export function createApp(): Express {
   const app = express();
   app.set("trust proxy", env.TRUST_PROXY === "true" ? true : /^\d+$/.test(env.TRUST_PROXY) ? Number(env.TRUST_PROXY) : env.TRUST_PROXY);
   app.disable("x-powered-by");
+
+  // On Vercel the public `/api/*` path reaches this service as-is; locally Next.js strips the prefix.
+  // Accept both so the routes below stay mounted at the root.
+  app.use((req, _res, next) => {
+    if (req.url === "/api" || req.url.startsWith("/api/") || req.url.startsWith("/api?")) req.url = req.url.slice(4) || "/";
+    next();
+  });
+  // Serverless: there is no startup hook, so connect on first use (a no-op once connected).
+  if (process.env.VERCEL) app.use((_req, _res, next) => void connectMongo().then(() => next(), next));
 
   app.use(helmet());
   app.use(

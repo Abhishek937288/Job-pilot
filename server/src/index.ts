@@ -24,7 +24,10 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
-main().catch((err: unknown) => {
+// On Vercel the platform invokes the exported app per request, so there is no listener to start.
+export default process.env.VERCEL ? createApp() : undefined;
+
+if (!process.env.VERCEL) main().catch((err: unknown) => {
   logger.fatal({ err }, "API failed to start");
   process.exit(1);
 });
