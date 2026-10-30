@@ -13,7 +13,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: WEB_ORIGIN
-        value: https://job-pilot-alpha-six.vercel.app
+        value: https://jobpilot.sas3d.in
       - key: MONGODB_URI
         sync: false
       - key: REDIS_URL
