@@ -1,7 +1,7 @@
 import mammoth from "mammoth";
-import { PDFParse } from "pdf-parse";
 import { env } from "../config/env.js";
 import { HttpError } from "../lib/errors.js";
+import { logger } from "../lib/logger.js";
 
 export type ResumeKind = "pdf" | "docx";
 
@@ -28,11 +28,34 @@ export interface ExtractedText {
   scanned: boolean;
 }
 
+/**
+ * pdfjs touches these browser globals at import time and loads `@napi-rs/canvas` to provide them, but that
+ * native package isn't bundled on serverless hosts. Text extraction never draws, so inert stand-ins are enough.
+ */
+function stubCanvasGlobals(): void {
+  const g = globalThis as Record<string, unknown>;
+  for (const name of ["DOMMatrix", "ImageData", "Path2D"]) g[name] ??= class {};
+}
+
+/**
+ * pdfjs imports its worker by a computed path that bundlers and serverless tracing miss. A static import is
+ * traced, and pdfjs uses `globalThis.pdfjsWorker` when set instead of importing the file itself.
+ */
+async function preloadPdfWorker(): Promise<void> {
+  const g = globalThis as Record<string, unknown>;
+  // @ts-expect-error pdfjs-dist ships no types for this deep import
+  g.pdfjsWorker ??= await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+}
+
 /** Plain text from the in-memory upload. Nothing is written to disk. */
 export async function extractText(buffer: Buffer, kind: ResumeKind): Promise<ExtractedText> {
   let raw: string;
   try {
     if (kind === "pdf") {
+      // Loaded on demand: pdfjs needs browser globals at import time, which would crash serverless startup.
+      stubCanvasGlobals();
+      await preloadPdfWorker();
+      const { PDFParse } = await import("pdf-parse");
       const parser = new PDFParse({ data: new Uint8Array(buffer) });
       try {
         raw = (await parser.getText()).text;
@@ -42,7 +65,8 @@ export async function extractText(buffer: Buffer, kind: ResumeKind): Promise<Ext
     } else {
       raw = (await mammoth.extractRawText({ buffer })).value;
     }
-  } catch {
+  } catch (err) {
+    logger.warn({ err, kind }, "resume text extraction failed");
     throw new HttpError(422, "The file could not be read. Is it a valid, unprotected PDF or DOCX?");
   }
   const text = raw.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();

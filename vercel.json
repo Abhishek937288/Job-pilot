@@ -3,11 +3,13 @@
   "services": {
     "server": {
       "root": "server",
-      "framework": "express"
+      "framework": "express",
+      "installCommand": "cd .. && npm install --include=dev"
     },
     "web": {
       "root": "web",
-      "framework": "nextjs"
+      "framework": "nextjs",
+      "installCommand": "cd .. && npm install --include=dev"
     }
   },
   "rewrites": [

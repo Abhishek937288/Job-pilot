@@ -60,3 +60,6 @@ export function createApp(): Express {
   app.use(errorHandler);
   return app;
 }
+
+// On Vercel the platform invokes the exported app per request, so there is no listener to start.
+export default process.env.VERCEL ? createApp() : undefined;
